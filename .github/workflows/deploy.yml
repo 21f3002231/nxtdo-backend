@@ -3,7 +3,7 @@ name: Deploy to Cloud Run
 on:
   pull_request:
     branches: [main, master]
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [main, master]
 
@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
