@@ -1,6 +1,9 @@
 name: Deploy to Cloud Run
 
 on:
+  pull_request:
+    branches: [main, master]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main, master]
 
@@ -17,22 +20,97 @@ jobs:
 
       - name: Set Environment Variables
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # PR Preview environment
+            echo "ENV_NAME=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "PROJECT_ID=nxtdo-dev" >> $GITHUB_ENV
+            echo "REGION=asia-south1" >> $GITHUB_ENV
+          elif [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
+            # Production environment
             echo "ENV_NAME=production" >> $GITHUB_ENV
             echo "PROJECT_ID=nxtdo-prod" >> $GITHUB_ENV
+            echo "REGION=asia-south1" >> $GITHUB_ENV
           else
-            echo "ENV_NAME=preview" >> $GITHUB_ENV
+            # Staging/Dev environment (main branch)
+            echo "ENV_NAME=staging" >> $GITHUB_ENV
             echo "PROJECT_ID=nxtdo-dev" >> $GITHUB_ENV
+            echo "REGION=asia-south1" >> $GITHUB_ENV
           fi
 
       - name: Build and Push Container
         run: |
-          gcloud builds submit --tag gcr.io/${{ env.PROJECT_ID }}/nxtdo-api:${{ github.sha }}
+          # Use async to avoid log streaming permission issues
+          BUILD_ID=$(gcloud builds submit --tag gcr.io/${{ env.PROJECT_ID }}/nxtdo-api:${{ github.sha }} \
+            --project=${{ env.PROJECT_ID }} \
+            --async \
+            --format='value(id)')
+          
+          echo "Build ID: $BUILD_ID"
+          
+          # Poll for build completion
+          while true; do
+            STATUS=$(gcloud builds describe $BUILD_ID \
+              --project=${{ env.PROJECT_ID }} \
+              --format='value(status)')
+            
+            echo "Build status: $STATUS"
+            
+            if [[ "$STATUS" == "SUCCESS" ]]; then
+              echo "Build completed successfully!"
+              break
+            elif [[ "$STATUS" == "FAILURE" || "$STATUS" == "CANCELLED" || "$STATUS" == "TIMEOUT" ]]; then
+              echo "Build failed with status: $STATUS"
+              # Get build logs for debugging
+              gcloud builds log $BUILD_ID --project=${{ env.PROJECT_ID }} || true
+              exit 1
+            fi
+            
+            sleep 10
+          done
 
       - name: Deploy to Cloud Run
+        id: deploy
         run: |
           gcloud run deploy nxtdo-api-${{ env.ENV_NAME }} \
             --image gcr.io/${{ env.PROJECT_ID }}/nxtdo-api:${{ github.sha }} \
             --platform managed \
-            --region us-central1 \
-            --allow-unauthenticated
+            --region ${{ env.REGION }} \
+            --allow-unauthenticated \
+            --project=${{ env.PROJECT_ID }} \
+            --port 8080
+          
+          # Get the service URL
+          SERVICE_URL=$(gcloud run services describe nxtdo-api-${{ env.ENV_NAME }} \
+            --region ${{ env.REGION }} \
+            --project=${{ env.PROJECT_ID }} \
+            --format='value(status.url)')
+          echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+      - name: Comment PR with Preview URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### 🚀 Preview Deployment Ready!\n\n**Preview URL:** ${{ steps.deploy.outputs.service_url }}\n\n**Environment:** \`pr-${{ github.event.pull_request.number }}\`\n**Commit:** ${{ github.sha }}`
+            })
+
+  # Cleanup PR preview environments after PR is closed/merged
+  cleanup:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Delete Preview Service
+        run: |
+          gcloud run services delete nxtdo-api-pr-${{ github.event.pull_request.number }} \
+            --region asia-south1 \
+            --project=nxtdo-dev \
+            --quiet || true
