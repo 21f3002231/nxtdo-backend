@@ -10,10 +10,10 @@ def read_root():
 def health_check():
     return {"status": "healthy"}
 
-@app.get("/Testing")
+@app.get("/testing")
 def test_endpoint():
     return {"message": "This is a Testing endpoint from feature branch!", "environment": "preview"}
 
-@app.get("/Checking")
+@app.get("/checking")
 def test_endpoint():
     return {"message": "This is a Checking endpoint from checking!", "environment": "preview"}
