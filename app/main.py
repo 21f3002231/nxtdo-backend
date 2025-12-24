@@ -68,7 +68,7 @@ def health_check():
     }
 
 # Task CRUD endpoints
-@app.post("/tasks")
+@app.post("/task")
 def create_task(task: TaskCreate):
     """Create a new task"""
     try:
